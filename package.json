@@ -1,0 +1,11 @@
+{
+  "name": "js-engine-mvp",
+  "version": "1.0.0",
+  "description": "A trackable JavaScript engine MVP implemented in JavaScript",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node demo.js",
+    "interactive": "node interactive/server.js"
+  }
+}

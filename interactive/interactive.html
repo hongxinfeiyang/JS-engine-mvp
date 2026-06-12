@@ -1,0 +1,1473 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JS Engine — 交互式执行追踪</title>
+<style>
+/* ─── 全局重置与变量 ─── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg: #1a1b26;
+    --panel-bg: #24283b;
+    --border: #414868;
+    --text: #c0caf5;
+    --text-dim: #565f89;
+    --accent: #7aa2f7;
+    --accent2: #bb9af7;
+    --green: #9ece6a;
+    --yellow: #e0af68;
+    --red: #f7768e;
+    --cyan: #7dcfff;
+    --orange: #ff9e64;
+    --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --radius: 8px;
+}
+
+body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--font-sans); font-size: 13px;
+    height: 100vh; overflow: hidden;
+    display: flex; flex-direction: column;
+}
+
+/* ─── 顶部工具栏 ─── */
+.toolbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 16px;
+    background: var(--panel-bg);
+    border-bottom: 1px solid var(--border);
+}
+.toolbar h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; }
+.toolbar h1 span { color: var(--accent2); font-weight: 300; margin-left: 4px; }
+.toolbar .actions { margin-left: auto; display: flex; gap: 8px; }
+.btn {
+    padding: 6px 14px; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg); color: var(--text); cursor: pointer;
+    font-family: var(--font-sans); font-size: 12px; font-weight: 500;
+    transition: all 0.15s;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); color: #1a1b26; border-color: var(--accent); font-weight: 600; }
+.btn.primary:hover { background: #89b4fa; }
+.btn.danger { border-color: var(--red); color: var(--red); }
+
+/* ─── 主布局：三栏 ─── */
+.main {
+    display: flex; flex: 1; overflow: hidden;
+}
+.left { width: 320px; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+.center { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.right { width: 420px; display: flex; flex-direction: column; border-left: 1px solid var(--border); overflow-y: auto; }
+
+/* ─── 左侧：代码编辑 ─── */
+.left .header { padding: 10px 12px; background: var(--panel-bg); border-bottom: 1px solid var(--border); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); display: flex; align-items: center; gap: 8px; }
+.left .header .line-indicator {
+    margin-left: auto; font-weight: 400; font-size: 11px; color: var(--accent);
+    font-family: var(--font-mono); letter-spacing: 0;
+    transition: opacity 0.15s;
+}
+.left .header .line-indicator.hidden { opacity: 0; }
+/* 代码编辑器容器：行号 + textarea */
+.code-editor-wrapper {
+    flex: 1; display: flex; overflow: hidden;
+    background: var(--bg);
+}
+.line-numbers {
+    width: 36px; flex-shrink: 0; overflow: hidden;
+    padding: 12px 0;
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
+    color: var(--text-dim); text-align: right;
+    user-select: none; pointer-events: none;
+    counter-reset: line;
+}
+.line-numbers span {
+    display: block; padding-right: 8px;
+    border-radius: 0 3px 3px 0; transition: background 0.2s, color 0.2s;
+}
+.line-numbers span.locked {
+    background: rgba(187,154,247,0.25); color: var(--accent2); font-weight: 600;
+}
+.code-editor {
+    flex: 1; padding: 12px;
+    background: var(--bg); color: var(--text);
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
+    border: none; outline: none; resize: none;
+    tab-size: 4; overflow-y: auto;
+}
+/* 源码行高亮（通过 textarea selection 实现，覆盖默认选中色） */
+.code-editor.highlight-line::selection {
+    background: rgba(122,162,247,0.25);
+}
+.left .header .exec-indicator {
+    margin-left: auto; font-weight: 400; font-size: 11px; color: var(--accent2);
+    font-family: var(--font-mono); letter-spacing: 0;
+}
+.code-editor::placeholder { color: var(--text-dim); }
+.left .footer { padding: 8px 12px; background: var(--panel-bg); border-top: 1px solid var(--border); display: flex; gap: 8px; }
+
+/* ─── 中间顶部：步骤控制 ─── */
+.step-controls {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 16px;
+    background: var(--panel-bg);
+    border-bottom: 1px solid var(--border);
+}
+.step-btn {
+    width: 34px; height: 34px; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg); color: var(--text); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; transition: all 0.15s;
+}
+.step-btn:hover { border-color: var(--accent); color: var(--accent); }
+.step-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.step-info {
+    flex: 1; text-align: center; font-family: var(--font-mono); font-size: 14px; font-weight: 600;
+}
+.step-info .step-num { color: var(--accent); }
+.step-info .step-total { color: var(--text-dim); }
+.auto-btn { font-size: 18px; }
+.auto-btn.playing { color: var(--green); border-color: var(--green); }
+.speed-slider { width: 80px; accent-color: var(--accent); }
+
+/* ─── 中间中部：事件描述 ─── */
+.event-desc {
+    padding: 10px 16px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-sans); font-size: 13px;
+    display: flex; align-items: center; gap: 8px;
+}
+.event-desc .icon {
+    width: 24px; height: 24px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; flex-shrink: 0;
+}
+.icon-context { background: #2a3f5f; color: var(--accent); }
+.icon-variable { background: #2a3f2a; color: var(--green); }
+.icon-scope { background: #3f2a5f; color: var(--accent2); }
+.icon-closure { background: #5f3f2a; color: var(--orange); }
+.icon-this { background: #5f2a3f; color: var(--red); }
+.icon-function { background: #2a5f5f; color: var(--cyan); }
+.event-desc .desc-text { flex: 1; }
+.event-desc .desc-hint {
+    font-size: 11px; color: var(--text-dim); margin-top: 2px;
+    font-family: var(--font-sans); line-height: 1.4;
+}
+.event-desc .desc-hint code {
+    background: rgba(122,162,247,0.12); color: var(--accent);
+    padding: 1px 4px; border-radius: 3px; font-family: var(--font-mono); font-size: 10px;
+}
+.event-desc .desc-hint .hl-var { color: var(--green); }
+.event-desc .desc-hint .hl-let { color: var(--accent2); }
+.event-desc .desc-hint .hl-const { color: var(--orange); }
+.event-desc .desc-hint .hl-tdz { color: var(--red); }
+
+/* ─── 中间中部：可视面板 ─── */
+.viz-panels {
+    flex: 1; overflow-y: auto; padding: 8px;
+    display: grid; grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto;
+    gap: 8px;
+}
+.panel {
+    background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius);
+    overflow: hidden; display: flex; flex-direction: column;
+}
+.panel-title {
+    padding: 6px 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+    background: rgba(0,0,0,0.2); border-bottom: 1px solid var(--border);
+    text-transform: uppercase; color: var(--text-dim);
+    display: flex; align-items: center; gap: 6px;
+}
+.panel-title .dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot-stack { background: var(--accent); }
+.dot-scope { background: var(--accent2); }
+.dot-closure { background: var(--orange); }
+.dot-this { background: var(--red); }
+.dot-memory { background: var(--green); }
+.dot-timeline { background: var(--cyan); }
+.panel-body {
+    flex: 1; padding: 8px 10px; overflow-y: auto;
+    font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
+}
+
+/* ─── 调用栈可视化 ─── */
+.stack-frame {
+    padding: 4px 8px; margin-bottom: 2px; border-radius: 4px;
+    background: rgba(122,162,247,0.08); border-left: 2px solid var(--accent);
+}
+.stack-frame.active { background: rgba(122,162,247,0.15); border-left-color: var(--green); }
+.stack-frame .sf-type { color: var(--accent); font-weight: 600; }
+.stack-frame .sf-name { color: var(--text); margin-left: 4px; }
+.stack-frame .sf-this { color: var(--text-dim); font-size: 10px; }
+
+/* ─── 作用域链可视化 ─── */
+.scope-env {
+    padding: 4px 8px; margin-bottom: 4px; border-radius: 4px;
+    background: rgba(187,154,247,0.08); border-left: 2px solid var(--accent2);
+}
+.scope-env .se-level { color: var(--accent2); font-weight: 600; }
+.scope-env .se-binding { color: var(--text-dim); margin-left: 6px; }
+.scope-env .se-val { color: var(--green); }
+/* 作用域链高亮：查找变量时高亮绑定名 */
+.se-binding-hl {
+    background: rgb(244 5 4); border-radius: 2px; padding: 0 2px;
+}
+/* 作用域链高亮：读变量值时高亮值 */
+.se-value-hl {
+    background: rgba(227, 32, 7, 0.3); border-radius: 2px; padding: 0 2px;
+    font-weight: 600;
+}
+
+/* ─── 内存可视化 ─── */
+.mem-entry {
+    padding: 3px 6px; margin-bottom: 2px; border-radius: 3px;
+    background: rgba(158,206,106,0.06); font-size: 10px;
+}
+.mem-entry.highlight {
+    background: rgba(158,206,106,0.2); border-left: 2px solid var(--green);
+}
+.mem-addr { color: var(--orange); }
+.mem-type { color: var(--accent); }
+.mem-val { color: var(--text-dim); }
+
+/* ─── 事件时间线（右侧） ─── */
+.timeline { padding: 0; }
+.timeline-item {
+    padding: 6px 10px; border-bottom: 1px solid rgba(65,72,104,0.3);
+    cursor: pointer; font-size: 11px; transition: background 0.1s;
+    display: flex; align-items: flex-start; gap: 6px;
+}
+.timeline-item:hover { background: rgba(122,162,247,0.06); }
+.timeline-item.current { background: rgba(122,162,247,0.15); border-left: 2px solid var(--accent); }
+/* 当前选中项按阶段着色 */
+.timeline-item.current.create-phase { background: rgba(187,154,247,0.12); border-left-color: var(--accent2); }
+.timeline-item.current.exec-phase { background: rgba(158,206,106,0.12); border-left-color: var(--green); }
+.timeline-item .ti-num { color: var(--text-dim); font-family: var(--font-mono); width: 28px; flex-shrink: 0; }
+.timeline-item .ti-text { flex: 1; }
+.timeline-item .ti-event { color: var(--text-dim); font-size: 10px; margin-top: 2px; }
+.timeline-item .ti-hint {
+    font-size: 10px; color: var(--accent); margin-top: 3px; line-height: 1.4;
+    font-family: var(--font-sans);
+}
+.timeline-item .ti-hint code {
+    background: rgba(122,162,247,0.1); padding: 0 3px; border-radius: 2px; font-family: var(--font-mono);
+}
+.timeline-item .ti-hint .hl-var { color: var(--green); }
+.timeline-item .ti-hint .hl-let { color: var(--accent2); }
+.timeline-item .ti-hint .hl-const { color: var(--orange); }
+.timeline-item .ti-hint .hl-tdz { color: var(--red); }
+.timeline-item .ti-phase {
+    font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 600;
+    letter-spacing: 0.3px; flex-shrink: 0; margin-top: 1px;
+}
+.ti-phase.create { background: rgba(187,154,247,0.15); color: var(--accent2); }
+.ti-phase.exec { background: rgba(158,206,106,0.12); color: var(--green); }
+/* 创建阶段条目用紫色左边框 */
+.timeline-item.create-phase { border-left: 2px solid transparent; }
+.timeline-item.create-phase:not(.current) { border-left-color: rgba(187,154,247,0.4); }
+.timeline-item.create-phase.current { border-left-color: var(--accent2); }
+/* 执行阶段条目用绿色左边框 */
+.timeline-item.exec-phase { border-left: 2px solid transparent; }
+.timeline-item.exec-phase:not(.current) { border-left-color: rgba(158,206,106,0.3); }
+.timeline-item.exec-phase.current { border-left-color: var(--green); }
+/* 时间线阶段图例 */
+.timeline-legend {
+    display: flex; gap: 16px; padding: 6px 10px;
+    background: var(--panel-bg); border-bottom: 1px solid var(--border);
+    font-size: 10px; color: var(--text-dim);
+}
+.timeline-legend span { display: flex; align-items: center; gap: 4px; }
+.timeline-legend .dot { width: 8px; height: 8px; border-radius: 2px; }
+.timeline-legend .dot.create { background: var(--accent2); }
+.timeline-legend .dot.exec { background: var(--green); }
+
+/* ─── 空状态 / 错误 / loading ─── */
+.empty-state {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: var(--text-dim); font-size: 13px;
+}
+.error-msg {
+    padding: 8px 12px; margin: 8px; border-radius: var(--radius);
+    background: rgba(247,118,142,0.1); border: 1px solid var(--red);
+    color: var(--red); font-family: var(--font-mono); font-size: 12px;
+}
+/* 错误横幅：在事件描述和可视化面板之间 */
+.error-banner {
+    margin: 0 8px; padding: 6px 12px; border-radius: var(--radius);
+    background: rgba(247,118,142,0.1); border: 1px solid var(--red);
+    color: var(--red); font-family: var(--font-mono); font-size: 12px;
+    display: flex; align-items: center; gap: 8px;
+}
+.error-banner .err-icon { font-size: 14px; flex-shrink: 0; }
+.error-banner .err-text { flex: 1; word-break: break-all; }
+.loading {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 20px; color: var(--text-dim);
+}
+.spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── 响应式：小屏时堆叠 ─── */
+@media (max-width: 1100px) {
+    .main { flex-direction: column; }
+    .left { width: 100%; height: 200px; border-right: none; border-bottom: 1px solid var(--border); }
+    .right { width: 100%; height: 250px; border-left: none; border-top: 1px solid var(--border); }
+    .viz-panels { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════ 顶部工具栏 ══════════════════════ -->
+<div class="toolbar">
+    <h1>JS Engine<span> 交互式执行追踪</span></h1>
+    <div class="actions">
+        <button class="btn" onclick="loadDemo('closure')">📦 闭包示例</button>
+        <button class="btn" onclick="loadDemo('this')">🎯 this 示例</button>
+        <button class="btn" onclick="loadDemo('scope')">🔗 作用域示例</button>
+        <button class="btn" onclick="loadDemo('hoisting')">📋 提升示例</button>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ 主布局 ══════════════════════ -->
+<div class="main">
+
+    <!-- ─── 左侧：代码编辑区 ─── -->
+    <div class="left">
+        <div class="header">📝 代码编辑<span class="exec-indicator hidden" id="execIndicator"></span><span class="line-indicator hidden" id="lineIndicator"></span></div>
+        <div class="code-editor-wrapper">
+            <div class="line-numbers" id="lineNumbers"></div>
+            <textarea id="codeEditor" class="code-editor" placeholder="在此输入 JavaScript 代码...">function outer() {
+    var x = 10;
+    return function inner() {
+        return x + 1;
+    };
+}
+var fn = outer();
+fn();</textarea>
+        </div>
+        <div class="footer">
+            <button class="btn primary" onclick="executeCode()">▶ 执行并追踪</button>
+            <button class="btn" onclick="clearAll()">✕ 清空</button>
+        </div>
+    </div>
+
+    <!-- ─── 中间：步骤控制 + 可视化面板 ─── -->
+    <div class="center" id="centerPanel">
+        <!-- 步骤控制条 -->
+        <div class="step-controls" id="stepControls" style="display:none">
+            <button class="step-btn" onclick="goToStep(0)" title="跳至开头">⏮</button>
+            <button class="step-btn" onclick="goToStep(currentStep - 1)" title="上一步">◀</button>
+            <div class="step-info">
+                步骤 <span class="step-num" id="stepNum">-</span>
+                /
+                <span class="step-total" id="stepTotal">-</span>
+            </div>
+            <button class="step-btn" onclick="goToStep(currentStep + 1)" title="下一步">▶</button>
+            <button class="step-btn" onclick="goToStep(steps.length - 1)" title="跳至末尾">⏭</button>
+            <button class="step-btn auto-btn" id="autoBtn" onclick="toggleAutoPlay()" title="自动播放">⏯</button>
+            <input type="range" class="speed-slider" id="speedSlider" min="100" max="2000" value="600" title="播放速度 (ms)">
+        </div>
+
+        <!-- 当前事件描述 -->
+        <div class="event-desc" id="eventDesc" style="display:none">
+            <div class="icon" id="eventIcon">▶</div>
+            <div style="flex:1">
+                <div class="desc-text" id="eventText"></div>
+                <div class="desc-hint" id="eventHint"></div>
+            </div>
+        </div>
+
+        <!-- 错误横幅：有步骤 + 有错误时显示 -->
+        <div class="error-banner" id="errorBanner" style="display:none">
+            <span class="err-icon">❌</span>
+            <span class="err-text" id="errorBannerText"></span>
+        </div>
+
+        <!-- 可视化面板 -->
+        <div class="viz-panels" id="vizPanels">
+            <!-- 调用栈 -->
+            <div class="panel">
+                <div class="panel-title"><span class="dot dot-stack"></span> 调用栈 (EC Stack)</div>
+                <div class="panel-body" id="stackPanel">
+                    <div class="empty-state">执行代码以查看调用栈</div>
+                </div>
+            </div>
+            <!-- 作用域链 -->
+            <div class="panel">
+                <div class="panel-title"><span class="dot dot-scope"></span> 作用域链 (Scope Chain)</div>
+                <div class="panel-body" id="scopePanel">
+                    <div class="empty-state">执行代码以查看作用域链</div>
+                </div>
+            </div>
+            <!-- 闭包 + this -->
+            <div class="panel">
+                <div class="panel-title"><span class="dot dot-closure"></span>函数 &amp; 闭包 &amp; this</div>
+                <div class="panel-body" id="closureThisPanel">
+                    <div class="empty-state">执行代码以查看闭包和 this</div>
+                </div>
+            </div>
+            <!-- 内存 -->
+            <div class="panel">
+                <div class="panel-title"><span class="dot dot-memory"></span> 堆内存 (Memory)</div>
+                <div class="panel-body" id="memoryPanel">
+                    <div class="empty-state">执行代码以查看堆内存</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── 右侧：事件时间线 ─── -->
+    <div class="right">
+        <div class="header">📋 事件时间线 (<span id="timelineCount">0</span> 步)</div>
+        <div class="timeline-legend" id="timelineLegend" style="display:none;">
+            <span><span class="dot create"></span> 创建阶段</span>
+            <span><span class="dot exec"></span> 执行阶段</span>
+        </div>
+        <div class="timeline" id="timeline" style="flex:1; overflow-y:auto;">
+            <div class="empty-state">执行代码后将在此显示步骤</div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ 脚本 ══════════════════════ -->
+<script>
+// ─── 全局状态 ───
+let steps = [];
+let currentStep = -1;
+let autoPlayTimer = null;
+let isPlaying = false;
+let execLockFunc = null; // 当前执行锁定的函数名
+let execLockRelease = false;
+
+// ─── 示例代码 ───
+const demos = {
+    closure: `function outer() {
+    var x = 10;
+    return function inner() {
+        return x + 1;
+    };
+}
+var fn = outer();
+fn();`,
+    this: `function getX() {
+    return this.x;
+}
+var obj = { x: 42 };
+getX.call(obj);`,
+    scope: `var a = 1;
+{
+    let b = 2;
+    var c = 3;
+}
+a + c;`,
+    hoisting: `console.log(x);
+var x = 10;
+let y = 20;`,
+};
+
+function loadDemo(name) {
+    document.getElementById('codeEditor').value = demos[name] || '';
+    updateLineNumbers();
+    if (demos[name]) executeCode();
+}
+
+// 手动更新行号（loadDemo / clearAll 等场景）
+function updateLineNumbers() {
+    const textarea = document.getElementById('codeEditor');
+    const lineNums = document.getElementById('lineNumbers');
+    const lines = textarea.value.split('\n');
+    let html = '';
+    for (let i = 1; i <= lines.length; i++) {
+        html += `<span>${i}</span>`;
+    }
+    lineNums.innerHTML = html;
+}
+
+// ─── 发送执行请求 ───
+async function executeCode() {
+    const code = document.getElementById('codeEditor').value;
+    if (!code.trim()) return;
+
+    // 显示加载状态
+    document.getElementById('stackPanel').innerHTML = '<div class="loading"><div class="spinner"></div>执行中...</div>';
+    document.getElementById('scopePanel').innerHTML = '<div class="loading"><div class="spinner"></div>执行中...</div>';
+    document.getElementById('closureThisPanel').innerHTML = '<div class="loading"><div class="spinner"></div>执行中...</div>';
+    document.getElementById('memoryPanel').innerHTML = '<div class="loading"><div class="spinner"></div>执行中...</div>';
+    document.getElementById('errorBanner').style.display = 'none';
+    highlightSourceLine(null); // 清除上次的源码高亮
+    stopAutoPlay();
+
+    try {
+        const resp = await fetch('/api/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+        });
+        const data = await resp.json();
+
+        steps = data.steps || [];
+        document.getElementById('stepControls').style.display = steps.length > 0 ? 'flex' : 'none';
+        document.getElementById('eventDesc').style.display = steps.length > 0 ? 'flex' : 'none';
+        document.getElementById('timeline').innerHTML = '';
+        document.getElementById('timelineCount').textContent = steps.length;
+
+        if (steps.length === 0) {
+            // 无步骤：直接展示错误或空状态
+            if (data.error) {
+                showError(data.error);
+            } else {
+                document.getElementById('stackPanel').innerHTML = '<div class="empty-state">代码执行完成，无关键步骤事件</div>';
+                document.getElementById('scopePanel').innerHTML = '<div class="empty-state">代码执行完成</div>';
+                document.getElementById('closureThisPanel').innerHTML = '<div class="empty-state">代码执行完成</div>';
+                document.getElementById('memoryPanel').innerHTML = '<div class="empty-state">代码执行完成</div>';
+            }
+            return;
+        }
+
+        // 有步骤：构建时间线并展示（即使存在运行时错误也不阻断回放）
+        buildTimeline();
+        goToStep(0);
+
+        if (data.error) {
+            showErrorBanner(data.error);
+        }
+    } catch (e) {
+        showError('请求失败: ' + e.message);
+    }
+}
+
+// ─── 在步骤上方展示运行时错误横幅 ───
+function showErrorBanner(err) {
+    const text = typeof err === 'string' ? err : (err.message || String(err));
+    document.getElementById('errorBannerText').textContent = text;
+    document.getElementById('errorBanner').style.display = 'flex';
+}
+
+function showError(msg) {
+    // msg 可能是字符串或 { message, name, stack } 对象
+    const text = typeof msg === 'string' ? msg : (msg.message || String(msg));
+    document.getElementById('stackPanel').innerHTML = `<div class="error-msg">${escapeHtml(text)}</div>`;
+    document.getElementById('scopePanel').innerHTML = '';
+    document.getElementById('closureThisPanel').innerHTML = '';
+    document.getElementById('memoryPanel').innerHTML = '';
+    document.getElementById('stepControls').style.display = 'none';
+    document.getElementById('eventDesc').style.display = 'none';
+    document.getElementById('errorBanner').style.display = 'none';
+}
+
+// ─── 判断是否为创建阶段事件 ───
+const CREATION_EVENTS = new Set([
+    'context:creation:start',
+    'context:creation:end',
+    'variable:declare',
+    'closure:create',
+    'memory:allocate',
+    'tokenize:start',
+    'tokenize:end',
+    'token',
+    'parse:start',
+    'parse:end',
+    'parse:node',
+]);
+
+function isCreationPhase(event) {
+    return CREATION_EVENTS.has(event);
+}
+
+// ─── 构建时间线 ───
+function buildTimeline() {
+    const tl = document.getElementById('timeline');
+    tl.innerHTML = steps.map((s, i) => {
+        const phase = isCreationPhase(s.event) ? 'create' : 'exec';
+        const phaseLabel = phase === 'create' ? '创建' : '执行';
+        const hintText = getHintPlainText(s);
+        return `<div class="timeline-item ${phase}-phase" id="tl-${i}" onclick="goToStep(${i})" title="${escapeHtml(hintText)}">
+            <span class="ti-num">#${i}</span>
+            <div style="flex:1">
+                <div class="ti-text">${escapeHtml(s.description)}</div>
+                <div class="ti-event">${s.event}</div>
+                ${hintText ? `<div class="ti-hint">💡 ${escapeHtml(hintText)}</div>` : ''}
+            </div>
+            <span class="ti-phase ${phase}">${phaseLabel}</span>
+        </div>`;
+    }).join('');
+    document.getElementById('timelineLegend').style.display = steps.length > 0 ? 'flex' : 'none';
+}
+
+// ─── 时间线用简短提示（纯文本） ───
+function getHintPlainText(step) {
+    const data = step.data || {};
+    switch (step.event) {
+        case 'variable:declare': {
+            const kind = data.kind;
+            if (kind === 'var') return 'var 提升至函数/全局作用域顶部，初始值 undefined';
+            if (kind === 'let') return 'let 提升但处于暂时性死区（TDZ），声明前访问报错';
+            if (kind === 'const') return 'const 提升但处于 TDZ，绑定不可变，须声明时初始化';
+            if (kind === 'function') return '函数声明完整提升，可在声明前调用';
+            return '';
+        }
+        case 'context:creation:start':
+            return '创建阶段：扫描声明并提升，var → undefined，let/const → TDZ';
+        case 'context:creation:end':
+            return '创建阶段完成，进入执行阶段逐条执行代码';
+        case 'closure:create':
+            return '函数创建时捕获当前词法环境作为 [[Environment]]，形成闭包';
+        case 'this:resolve': {
+            const patterns = {
+                'global': '全局 this 指向全局对象',
+                'method-call': '方法调用 this 指向调用者对象 (obj.fn())',
+                'explicit': '通过 call/apply/bind 显式指定 this',
+                'arrow': '箭头函数忽略调用时 this，使用定义时捕获的 this',
+            };
+            return patterns[data.pattern] || '';
+        }
+        case 'scope:lookup':
+            return `沿作用域链从内向外查找标识符 "${data.name || ''}"`;
+        case 'scope:chain:resolve':
+            return data.found
+                ? `标识符 "${data.name || ''}" 在深度 ${data.depth} 处找到`
+                : `标识符 "${data.name || ''}" 未找到 → ReferenceError`;
+        default:
+            return '';
+    }
+}
+
+// ─── 事件描述区富文本提示（HTML） ───
+function getEventHint(step) {
+    const data = step.data || {};
+    switch (step.event) {
+        case 'variable:declare': {
+            const kind = data.kind;
+            if (kind === 'var') {
+                return '<code class="hl-var">var</code> 声明被<strong>提升（hoisting）</strong>至函数/全局作用域顶部，初始值自动设为 <code class="hl-var">undefined</code>，因此声明前访问不会报错';
+            }
+            if (kind === 'let') {
+                return '<code class="hl-let">let</code> 声明被提升但处于<strong class="hl-tdz">暂时性死区（TDZ）</strong>，初始状态为"未初始化"。声明前访问会抛出 <code class="hl-tdz">ReferenceError</code>';
+            }
+            if (kind === 'const') {
+                return '<code class="hl-const">const</code> 声明被提升但处于<strong class="hl-tdz">TDZ</strong>，且绑定不可变（mutable: false），必须在声明时初始化';
+            }
+            if (kind === 'function') {
+                return '函数声明<strong>完整提升</strong>：绑定和函数对象在创建阶段同时就绪，因此可在声明前调用';
+            }
+            return '';
+        }
+        case 'context:creation:start':
+            return '进入<strong>创建阶段</strong>：引擎扫描所有声明并执行提升（hoisting）—— <code class="hl-var">var</code> 初始化为 <code class="hl-var">undefined</code>，<code class="hl-let">let</code>/<code class="hl-const">const</code> 进入 TDZ，函数声明完整就绪';
+        case 'context:creation:end':
+            return '创建阶段完成，环境已就绪。接下来进入 <strong>执行阶段</strong>，逐条执行代码';
+        case 'closure:create':
+            return '函数对象创建时捕获当前词法环境作为 <strong>[[Environment]]</strong>，后续调用时新作用域的 outer 指向此环境 —— 这就是<strong>闭包</strong>的基石';
+        case 'this:resolve': {
+            const patterns = {
+                'global': '全局作用域中 <code>this</code> 指向全局对象',
+                'method-call': '方法调用（<code>obj.fn()</code>）中 <code>this</code> 指向调用者对象',
+                'explicit': '通过 <code>call</code> / <code>apply</code> / <code>bind</code> 显式指定 <code>this</code>',
+                'arrow': '箭头函数忽略调用时的 <code>this</code>，使用定义时捕获的 <code>this</code>（词法 this）',
+            };
+            return patterns[data.pattern] || '';
+        }
+        case 'scope:lookup':
+            return `引擎沿<strong>作用域链</strong>从内向外查找标识符 <code>"${escapeHtml(data.name || '')}"</code>，先在当前词法环境查找，未找到则沿 <code>outer</code> 链向外逐级查找`;
+        case 'scope:chain:resolve':
+            return data.found
+                ? `标识符 <code>"${escapeHtml(data.name || '')}"</code> 在作用域深度 <strong>${data.depth}</strong> 处找到`
+                : `标识符 <code>"${escapeHtml(data.name || '')}"</code> 未找到 → 抛出 <code class="hl-tdz">ReferenceError</code>`;
+        default:
+            return '';
+    }
+}
+
+// ─── 源码精确匹配与高亮 ───
+
+/**
+ * 根据步骤数据启发式匹配源码中的精确片段
+ * 返回 { line, colStart, colEnd } 或 null
+ */
+function findSourceRange(step) {
+    const code = document.getElementById('codeEditor').value;
+    const lines = code.split('\n');
+    const data = step.data || {};
+
+    // 辅助：创建单词边界正则，避免 "a" 误匹配 "var" / "bar" / "Array" 等
+    const wordRegex = (name) => new RegExp('\\b' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b');
+
+    // 辅助：在所有行中搜索包含 pattern 的行（pattern 是精确的源码片段，直接 indexOf 即可）
+    const searchPattern = (pattern) => {
+        for (let i = 0; i < lines.length; i++) {
+            const idx = lines[i].indexOf(pattern);
+            if (idx !== -1) return { line: i, colStart: idx, colEnd: idx + pattern.length };
+        }
+        return null;
+    };
+
+    // 辅助：定位函数体 { } 行范围
+    const findFuncBody = (funcName) => {
+        const funcRe = /\bfunction\s+([a-zA-Z_$][\w$]*)\s*\(/;
+        for (let k = 0; k < lines.length; k++) {
+            const dm = lines[k].match(funcRe);
+            if (dm && dm[1] === funcName) {
+                const openIdx = lines[k].indexOf('{', dm.index);
+                if (openIdx === -1) return null;
+                let depth = 0;
+                for (let r = k; r < lines.length; r++) {
+                    for (let c = (r === k ? openIdx : 0); c < lines[r].length; c++) {
+                        if (lines[r][c] === '{') depth++;
+                        if (lines[r][c] === '}') { depth--; if (depth === 0) return { start: k, end: r }; }
+                    }
+                }
+                return null;
+            }
+        }
+        return null;
+    };
+
+    // 辅助：从 ecStack 或前序步骤推断当前函数体行范围（用于限定变量搜索）
+    const getFuncBodyRange = () => {
+        const ecStack = step.ecStack || [];
+        for (let j = ecStack.length - 1; j >= 0; j--) {
+            if (ecStack[j].type === 'function' && ecStack[j].name) {
+                const r = findFuncBody(ecStack[j].name);
+                if (r) return r;
+            }
+        }
+        for (let j = step.index - 1; j >= 0; j--) {
+            const prev = steps[j];
+            if (prev.event === 'context:creation:start' && prev.data && prev.data.type === 'function' && prev.data.name) {
+                const r = findFuncBody(prev.data.name);
+                if (r) return r;
+            }
+            if (prev.event === 'context:creation:end' || prev.event === 'context:pop') break;
+        }
+        return { start: 0, end: lines.length - 1 };
+    };
+
+    // 辅助：从底部向上以单词边界搜索，匹配精确片段（优先内层声明）
+    const searchFragments = (name, exactPattern) => {
+        const re = wordRegex(name);
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (!re.test(lines[i])) continue;
+            if (exactPattern) {
+                const idx = lines[i].indexOf(exactPattern);
+                if (idx !== -1) return { line: i, colStart: idx, colEnd: idx + exactPattern.length };
+                continue; // 该行有变量名但无精确片段，继续找下一行
+            }
+            return { line: i, colStart: 0, colEnd: lines[i].length };
+        }
+        return null;
+    };
+
+    // 辅助：查找变量使用处（非声明行），从底部向上优先表达式行
+    const findUsageSite = (name) => {
+        const re = wordRegex(name);
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const trimmed = lines[i].trim();
+            if (/^(var|let|const|function)\s/.test(trimmed)) continue;
+            const match = lines[i].match(re);
+            if (match) {
+                const idx = match.index;
+                const after = lines[i].substring(idx + name.length);
+                const memberMatch = after.match(/^\.\s*[a-zA-Z_$][\w$]*/);
+                if (memberMatch) {
+                    return { line: i, colStart: idx, colEnd: idx + name.length + memberMatch[0].length };
+                }
+                return { line: i, colStart: idx, colEnd: idx + name.length };
+            }
+        }
+        return null;
+    };
+
+    // 辅助：查找完整调用表达式，从底部向上
+    const findCallExpr = (name) => {
+        const re = wordRegex(name);
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const trimmed = lines[i].trim();
+            if (/^function\s/.test(trimmed)) continue;
+            const match = lines[i].match(re);
+            if (!match) continue;
+            const nameIdx = match.index;
+            const before = lines[i].substring(0, nameIdx);
+            if (/\bfunction\s+$/.test(before)) continue;
+            const afterName = lines[i].substring(nameIdx + name.length);
+            const parenMatch = afterName.match(/[^(]*\(/);
+            if (!parenMatch) continue;
+            const openIdx = nameIdx + name.length + parenMatch[0].length - 1;
+            let depth = 0, closeIdx = -1;
+            for (let j = openIdx; j < lines[i].length; j++) {
+                if (lines[i][j] === '(') depth++;
+                if (lines[i][j] === ')') { depth--; if (depth === 0) { closeIdx = j + 1; break; } }
+            }
+            if (closeIdx === -1) continue;
+            return { line: i, colStart: nameIdx, colEnd: closeIdx };
+        }
+        return null;
+    };
+
+    switch (step.event) {
+        case 'context:creation:start':
+            if (data.type === 'function' && data.name) {
+                return searchPattern('function ' + data.name);
+            }
+            return null;
+
+        case 'variable:declare': {
+            const name = data.name;
+            const kind = data.kind;
+            // 通过前序步骤推断当前所在函数，限制搜索范围避免跨函数同名误匹配
+            const declRange = getFuncBodyRange();
+            // 在限定范围内从底部搜索声明（优先内层）
+            const re = wordRegex(name);
+            const exact = kind + ' ' + name;
+            for (let i = declRange.end; i >= declRange.start; i--) {
+                if (!re.test(lines[i])) continue;
+                const idx = lines[i].indexOf(exact);
+                if (idx !== -1) return { line: i, colStart: idx, colEnd: idx + exact.length };
+            }
+            return searchPattern(exact);
+        }
+
+        case 'variable:assign': {
+            const name = data.name;
+            const nameRe = new RegExp('\\b' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b');
+            const assignRange = getFuncBodyRange();
+            for (let i = assignRange.start; i <= assignRange.end; i++) {
+                const line = lines[i];
+                const nameMatch = line.match(nameRe);
+                if (!nameMatch) continue;
+                const nameIdx = nameMatch.index;
+                const afterName = line.substring(nameIdx + name.length);
+                const eqMatch = afterName.match(/\s*=\s*/);
+                if (!eqMatch) continue;
+                const eqStart = nameIdx + name.length + eqMatch.index;
+                const eqEnd = eqStart + eqMatch[0].length;
+                const afterEq = line.substring(eqEnd);
+                const semiIdx = afterEq.indexOf(';');
+                const valueStr = semiIdx === -1 ? afterEq : afterEq.substring(0, semiIdx);
+                const pattern = name + eqMatch[0] + valueStr;
+                return { line: i, colStart: nameIdx, colEnd: nameIdx + pattern.length };
+            }
+            return null;
+        }
+
+        case 'variable:read': {
+            const name = data.name;
+            // 读取变量 → 在源码中选中该变量的使用处（非声明行）
+            const usage = findUsageSite(name);
+            if (usage) return usage;
+            return searchPattern(name);
+        }
+
+        case 'function:call': {
+            if (data.name) {
+                // 选中完整调用表达式，如 "getX.call(obj)" 或 "console.log(x)"
+                const call = findCallExpr(data.name);
+                if (call) return call;
+                return searchPattern(data.name + '(');
+            }
+            return null;
+        }
+
+        case 'function:return':
+            return searchPattern('return ');
+
+        case 'closure:create':
+            if (data.funcName) return searchPattern('function ' + data.funcName);
+            return null;
+
+        case 'this:resolve': {
+            // this 绑定时选中完整的调用表达式（如 console.log(x)、getX.call(obj)）
+            if (data.pattern === 'method-call' || data.pattern === 'explicit') {
+                for (let i = lines.length - 1; i >= 0; i--) {
+                    const trimmed = lines[i].trim();
+                    if (/^(var|let|const|function)\s/.test(trimmed)) continue;
+                    const parenStart = trimmed.indexOf('(');
+                    if (parenStart === -1) continue;
+                    // 找到匹配的 )，选中从行首标识符到 )
+                    let depth = 0, parenEnd = -1;
+                    for (let j = parenStart; j < trimmed.length; j++) {
+                        if (trimmed[j] === '(') depth++;
+                        if (trimmed[j] === ')') { depth--; if (depth === 0) { parenEnd = j; break; } }
+                    }
+                    if (parenEnd === -1) continue;
+                    // 从第一个非空白字符开始
+                    const firstChar = trimmed.search(/\S/);
+                    const end = parenEnd + 1;
+                    const rawEnd = trimmed.endsWith(';') ? end : end;
+                    return { line: i, colStart: firstChar >= 0 ? firstChar : 0, colEnd: rawEnd };
+                }
+            }
+            return null;
+        }
+
+        case 'scope:lookup':
+        case 'scope:chain:resolve': {
+            const name = data.name;
+            // 作用域查找 → 在源码中选中该变量的使用处（非声明行）
+            const usage = findUsageSite(name);
+            if (usage) return usage;
+            return searchPattern(name);
+        }
+
+        case 'eval:node:exit':
+            if (data.type === 'ExpressionStatement') {
+                // 若在函数调用上下文中，优先选该函数的调用表达式
+                const ecStack = step.ecStack || [];
+                let ctxFunc = null;
+                for (let j = ecStack.length - 1; j >= 0; j--) {
+                    if (ecStack[j].type === 'function' && ecStack[j].name) { ctxFunc = ecStack[j].name; break; }
+                }
+                // 若 ecStack 无函数（刚返回），回溯看最近的 function:return
+                if (!ctxFunc) {
+                    for (let j = step.index - 1; j >= Math.max(0, step.index - 5); j--) {
+                        const ps = steps[j];
+                        if (ps.event === 'function:return' && ps.data && ps.data.name) { ctxFunc = ps.data.name; break; }
+                        if (ps.event === 'eval:node:exit') break;
+                    }
+                }
+                // 若找到上下文函数，回溯找源码调用名（inner → fn），搜索其调用表达式
+                if (ctxFunc) {
+                    // 找到该函数的 context:creation:start，从那里向前回溯找 scope:lookup
+                    let creationIdx = -1;
+                    for (let j = step.index - 1; j >= 0; j--) {
+                        const ps = steps[j];
+                        if (ps.event === 'context:creation:start' && ps.data && ps.data.type === 'function' && ps.data.name === ctxFunc) {
+                            creationIdx = j; break;
+                        }
+                    }
+                    if (creationIdx >= 0) {
+                        for (let j = creationIdx - 1; j >= Math.max(0, creationIdx - 12); j--) {
+                            const ps = steps[j];
+                            if (ps.event === 'function:return') break;
+                            if ((ps.event === 'scope:lookup' || ps.event === 'variable:read') && ps.data && ps.data.name !== ctxFunc) {
+                                ctxFunc = ps.data.name; break;
+                            }
+                        }
+                    }
+                    const callRe = new RegExp('\\b' + ctxFunc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\(');
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        if (/^function\s/.test(lines[i].trim())) continue;
+                        const m = lines[i].match(callRe);
+                        if (m) {
+                            let depth = 0, end = -1;
+                            const openIdx = lines[i].indexOf('(', m.index);
+                            for (let c = openIdx; c < lines[i].length; c++) {
+                                if (lines[i][c] === '(') depth++;
+                                if (lines[i][c] === ')') { depth--; if (depth === 0) { end = c + 1; break; } }
+                            }
+                            if (end > 0) return { line: i, colStart: m.index, colEnd: end };
+                        }
+                    }
+                }
+                // 回退：选中最后一条非声明表达式语句
+                for (let i = lines.length - 1; i >= 0; i--) {
+                    const trimmed = lines[i].trim();
+                    if (!trimmed || trimmed.startsWith('//')) continue;
+                    if (/^(var|let|const|function|return|if|\{|\})/.test(trimmed)) continue;
+                    const firstChar = lines[i].search(/\S/);
+                    const content = trimmed.endsWith(';') ? trimmed.slice(0, -1) : trimmed;
+                    const end = firstChar + content.length;
+                    return { line: i, colStart: firstChar >= 0 ? firstChar : 0, colEnd: end };
+                }
+            }
+            if (data.type === 'ReturnStatement') return searchPattern('return ');
+            return null;
+
+        case 'context:push':
+        case 'context:pop':
+            return null;
+
+        default:
+            return null;
+    }
+}
+
+/**
+ * 在 textarea 中精确高亮指定源码片段
+ * @param {object|null} range - { line, colStart, colEnd } 或 null 清除
+ */
+function highlightSourceLine(range) {
+    const textarea = document.getElementById('codeEditor');
+    const indicator = document.getElementById('lineIndicator');
+
+    if (!range) {
+        textarea.setSelectionRange(0, 0);
+        textarea.classList.remove('highlight-line');
+        indicator.textContent = '';
+        indicator.classList.add('hidden');
+        return;
+    }
+
+    const code = textarea.value;
+    const lines = code.split('\n');
+
+    let absStart = 0;
+    for (let i = 0; i < range.line; i++) {
+        absStart += lines[i].length + 1;
+    }
+    absStart += range.colStart;
+    const absEnd = absStart + (range.colEnd - range.colStart);
+
+    textarea.classList.add('highlight-line');
+    textarea.setSelectionRange(absStart, absEnd);
+    textarea.focus({ preventScroll: true });
+
+    indicator.textContent = '行 ' + (range.line + 1) + ' 列 ' + (range.colStart + 1);
+    indicator.classList.remove('hidden');
+}
+
+/**
+ * 更新源码编辑器的执行入口锁定状态
+ * 仅通过紫色边框 + 头部指示器标记，不干扰步骤选中
+ */
+function updateExecLock(step) {
+    const textarea = document.getElementById('codeEditor');
+    const execInd = document.getElementById('execIndicator');
+    const lineNums = document.getElementById('lineNumbers');
+
+    // 从当前步骤位置前后扫描，确定是否处于函数调用范围内
+    // 找到最近的函数入口和对应的出口，若当前步骤在区间内则锁定
+    let lockName = null;
+    let lockEnd = -1;
+
+    // 向后扫描找入口（扫到开头，不限边界）
+    for (let j = step.index; j >= 0; j--) {
+        const ps = steps[j];
+        const pd = ps.data || {};
+        // 当前步是 function:return → 跳过继续往前找入口
+        if (j === step.index && ps.event === 'function:return') continue;
+        // context:creation:start(function) → 入口
+        if (ps.event === 'context:creation:start' && pd.type === 'function' && pd.name) {
+            lockName = pd.name;
+            // 回溯找调用变量名（如 fn → inner）
+            for (let b = j - 1; b >= Math.max(0, j - 12); b--) {
+                const bs = steps[b];
+                if (bs.event === 'function:return' || bs.event === 'context:pop' || bs.event === 'eval:node:exit') break;
+                if ((bs.event === 'scope:lookup' || bs.event === 'variable:read') && bs.data && bs.data.name !== lockName) {
+                    lockName = bs.data.name; break;
+                }
+            }
+            lockEnd = j;
+            break;
+        }
+        // scope:lookup 后跟 function:call/context:creation:start → 入口
+        if ((ps.event === 'scope:lookup' || ps.event === 'variable:read') && pd.name) {
+            let foundCall = false;
+            for (let k = j + 1; k < Math.min(j + 10, steps.length); k++) {
+                const ns = steps[k];
+                if (ns.event === 'function:call' && ns.data && ns.data.name) { lockName = pd.name; foundCall = true; break; }
+                if (ns.event === 'context:creation:start' && ns.data && ns.data.type === 'function' && ns.data.name) { lockName = pd.name; foundCall = true; break; }
+                if ((ns.event === 'scope:lookup' || ns.event === 'variable:assign') && ns.data && ns.data.name && ns.data.name !== pd.name) break;
+            }
+            if (foundCall) { lockEnd = j; break; }
+        }
+    }
+
+    // 向前扫描找出口：跳过入口自身的 context:creation:start，用 depth=0 计数嵌套
+    if (lockName) {
+        // 入口自身的 context:creation:start 不计入嵌套深度，先跳过
+        let scanStart = lockEnd + 1;
+        for (let k = scanStart; k < Math.min(scanStart + 5, steps.length); k++) {
+            const ns = steps[k], nd = ns.data || {};
+            if (ns.event === 'context:creation:start' && nd.type === 'function') {
+                scanStart = k + 1; break;
+            }
+            if (ns.event === 'function:call' || ns.event === 'function:return') break;
+        }
+        let depth = 0;
+        for (let k = scanStart; k < steps.length; k++) {
+            const ns = steps[k];
+            const nd = ns.data || {};
+            if (ns.event === 'context:creation:start' && nd.type === 'function') depth++;
+            if (ns.event === 'function:return') {
+                if (depth === 0) {
+                    lockEnd = k;
+                    if (k + 1 < steps.length && steps[k + 1].event === 'eval:node:exit') lockEnd = k + 1;
+                    break;
+                }
+                depth--;
+            }
+        }
+        if (step.index > lockEnd) lockName = null;
+    }
+
+    // 清除旧锁定行号
+    lineNums.querySelectorAll('span.locked').forEach(s => s.classList.remove('locked'));
+
+    if (lockName) {
+        // 查找调用处行号并锁定
+        const code = textarea.value;
+        const lines = code.split('\n');
+        let callLine = -1;
+        const callRe = new RegExp('\\b' + lockName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\(');
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (/^function\s/.test(lines[i].trim())) continue;
+            if (callRe.test(lines[i])) { callLine = i; break; }
+        }
+        if (callLine >= 0) {
+            const spans = lineNums.querySelectorAll('span');
+            if (spans[callLine]) spans[callLine].classList.add('locked');
+        }
+        execInd.textContent = '🔒 ' + lockName + '()' + (callLine >= 0 ? ' @行' + (callLine + 1) : '');
+        execInd.classList.remove('hidden');
+    } else {
+        execInd.textContent = '';
+        execInd.classList.add('hidden');
+    }
+}
+
+// ─── 步进控制 ───
+function goToStep(n) {
+    if (n < 0 || n >= steps.length) return;
+    currentStep = n;
+    const step = steps[n];
+
+    // 更新步骤计数
+    document.getElementById('stepNum').textContent = n;
+    document.getElementById('stepTotal').textContent = steps.length;
+
+    // 更新事件描述
+    const iconMap = {
+        'context:creation:start': ['EC', 'icon-context'],
+        'context:creation:end': ['EC', 'icon-context'],
+        'context:push': ['EC', 'icon-context'],
+        'context:pop': ['EC', 'icon-context'],
+        'variable:declare': ['V', 'icon-variable'],
+        'variable:assign': ['V', 'icon-variable'],
+        'variable:read': ['V', 'icon-variable'],
+        'scope:lookup': ['S', 'icon-scope'],
+        'scope:chain:resolve': ['S', 'icon-scope'],
+        'closure:create': ['C', 'icon-closure'],
+        'this:resolve': ['T', 'icon-this'],
+        'function:call': ['F', 'icon-function'],
+        'function:return': ['F', 'icon-function'],
+    };
+    const [icon, iconClass] = iconMap[step.event] || ['•', 'icon-context'];
+    document.getElementById('eventIcon').textContent = icon;
+    document.getElementById('eventIcon').className = 'icon ' + iconClass;
+    document.getElementById('eventText').textContent = step.description;
+    document.getElementById('eventHint').innerHTML = getEventHint(step);
+
+    // 更新执行锁状态（CSS 背景 + 边框，不抢占 selection）
+    updateExecLock(step);
+
+    // 匹配源码片段并高亮（per-step selection）
+    const range = findSourceRange(step);
+    highlightSourceLine(range);
+
+    // 渲染各面板
+    renderCallStack(step);
+    // 作用域查找/变量读取时在作用域链面板中高亮对应绑定
+    let scopeHighlight = null;
+    const sd = step.data || {};
+    if (step.event === 'scope:lookup' || step.event === 'scope:chain:resolve') {
+        scopeHighlight = { type: 'binding', name: sd.name, depth: sd.depth };
+    } else if (step.event === 'variable:read') {
+        scopeHighlight = { type: 'value', name: sd.name };
+    }
+    renderScopeChain(step, scopeHighlight);
+    renderClosureThis(step);
+    // 变量读取时若值为引用类型，在堆内存中高亮对应地址
+    let memHighlight = null;
+    if (step.event === 'variable:read' && scopeHighlight) {
+        const chain = step.scopeChain || [];
+        for (const env of chain) {
+            const bindings = env.bindings || {};
+            const binding = bindings[scopeHighlight.name];
+            if (binding && binding.value && typeof binding.value === 'object' && binding.value.address != null) {
+                memHighlight = binding.value.address;
+                break;
+            }
+        }
+    }
+    renderMemory(step, memHighlight);
+
+    // 高亮时间线当前项
+    document.querySelectorAll('.timeline-item').forEach(el => el.classList.remove('current'));
+    const tlItem = document.getElementById('tl-' + n);
+    if (tlItem) {
+        tlItem.classList.add('current');
+        tlItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+}
+
+// ─── 渲染调用栈 ───
+function renderCallStack(step) {
+    const panel = document.getElementById('stackPanel');
+    const ecStack = step.ecStack || [];
+
+    if (ecStack.length === 0) {
+        panel.innerHTML = '<div class="empty-state">调用栈为空</div>';
+        return;
+    }
+
+    panel.innerHTML = ecStack.map((ec, i) => {
+        const isTop = i === ecStack.length - 1;
+        const thisVal = ec.thisBinding !== undefined ? stringifyVal(ec.thisBinding) : '-';
+        return `<div class="stack-frame${isTop ? ' active' : ''}">
+            <span class="sf-type">${ec.type}</span>
+            <span class="sf-name">${ec.name || ''}</span>
+            <div class="sf-this">this: ${thisVal}</div>
+        </div>`;
+    }).reverse().join('');
+}
+
+// ─── 渲染作用域链 ───
+// highlight: { type: 'binding'|'value', name: string, depth?: number }
+//   type='binding' → 查找变量时高亮作用域中的绑定名
+//   type='value'   → 读取变量时高亮作用域中的值
+function renderScopeChain(step, highlight) {
+    const panel = document.getElementById('scopePanel');
+    const scopeChain = step.scopeChain || [];
+
+    if (scopeChain.length === 0) {
+        panel.innerHTML = '<div class="empty-state">作用域链为空</div>';
+        return;
+    }
+
+    panel.innerHTML = scopeChain.map((env, i) => {
+        const bindings = env.bindings || {};
+        const entries = Object.entries(bindings);
+        const isCurrent = i === 0;
+        return `<div class="scope-env" style="${isCurrent ? 'opacity:1' : 'opacity:0.6'}">
+            <span class="se-level">${isCurrent ? '▶ 当前' : '  Level ' + i}</span>
+            ${entries.length === 0
+                ? '<div style="color:var(--text-dim);font-size:10px;margin-left:8px;">(空环境)</div>'
+                : entries.map(([k, v]) => {
+                    const hlBinding = highlight && highlight.type === 'binding' && highlight.name === k
+                        && (highlight.depth === undefined || highlight.depth === i);
+                    const hlValue = highlight && highlight.type === 'value' && highlight.name === k;
+                    const bindingCls = hlBinding ? 'se-binding-hl' : '';
+                    const valueCls = hlValue ? 'se-val se-value-hl' : 'se-val';
+                    return `<div style="margin-left:8px;font-size:10px;">
+                        <span style="color:var(--text)" class="${bindingCls}">${escapeHtml(k)}</span>
+                        <span style="color:var(--text-dim)"> = </span>
+                        <span class="${valueCls}">${stringifyVal(v)}</span>
+                    </div>`;
+                }).join('')}
+        </div>`;
+    }).join('');
+}
+
+// ─── 渲染闭包和 this ───
+function renderClosureThis(step) {
+    const panel = document.getElementById('closureThisPanel');
+    const data = step.data || {};
+
+    let html = '';
+
+    // this 信息
+    if (data.pattern || step.event === 'this:resolve') {
+        html += `<div style="margin-bottom:8px;">
+            <div style="color:var(--text-dim);font-size:10px;margin-bottom:2px;">this 绑定</div>
+            <div style="padding:4px 8px;background:rgba(247,118,142,0.08);border-radius:4px;border-left:2px solid var(--red);">
+                <span style="color:var(--red);font-weight:600;">${data.pattern || '-'}</span>
+                <span style="margin-left:6px;">${stringifyVal(data.value)}</span>
+            </div>
+        </div>`;
+    }
+
+    // 闭包信息：isRealClosure 区分闭包/嵌套函数/顶层函数
+    if (data.funcName || step.event === 'closure:create') {
+        const isReal = data.isRealClosure;
+        const isNested = data.isNested;
+        const label = isReal ? '闭包' : (isNested ? '嵌套函数' : '函数创建');
+        const bg = isReal ? 'rgba(255,158,100,0.08)' : (isNested ? 'rgba(187,154,247,0.06)' : 'rgba(125,207,255,0.06)');
+        const border = isReal ? 'var(--orange)' : (isNested ? 'var(--accent2)' : 'var(--cyan)');
+        const color = isReal ? 'var(--orange)' : (isNested ? 'var(--accent2)' : 'var(--cyan)');
+        const detail = isReal ? '捕获变量: [' + (data.capturedVars || []).join(', ') + ']'
+            : (isNested ? '（嵌套在父函数中，无捕获变量）' : '（顶层函数，无闭包变量）');
+        html += `<div style="margin-bottom:8px;">
+            <div style="color:var(--text-dim);font-size:10px;margin-bottom:2px;">${label}</div>
+            <div style="padding:4px 8px;background:${bg};border-radius:4px;border-left:2px solid ${border};">
+                <span style="color:${color};font-weight:600;">${data.funcName || '(anonymous)'}</span>
+                <div style="margin-top:2px;font-size:10px;color:var(--text-dim);">${detail}</div>
+            </div>
+        </div>`;
+    }
+
+    // 函数调用信息
+    if (data.name && (step.event === 'function:call' || step.event === 'function:return')) {
+        const isCall = step.event === 'function:call';
+        html += `<div style="margin-bottom:8px;">
+            <div style="color:var(--text-dim);font-size:10px;margin-bottom:2px;">${isCall ? '函数调用' : '函数返回'}</div>
+            <div style="padding:4px 8px;background:rgba(125,207,255,0.08);border-radius:4px;border-left:2px solid var(--cyan);">
+                <span style="color:var(--cyan);font-weight:600;">${data.name || '-'}</span>
+                ${isCall ? `<span style="margin-left:4px;color:var(--text-dim);">(${(data.args || []).map(a => stringifyVal(a)).join(', ')})</span>` : ''}
+                ${!isCall && data.value !== undefined ? `<span style="margin-left:4px;color:var(--green);">→ ${stringifyVal(data.value)}</span>` : ''}
+            </div>
+        </div>`;
+    }
+
+    panel.innerHTML = html || '<div class="empty-state">暂无闭包或 this 事件</div>';
+}
+
+// ─── 渲染堆内存 ───
+function renderMemory(step, highlightAddr) {
+    const panel = document.getElementById('memoryPanel');
+    const mem = step.memory || {};
+    const entries = Object.entries(mem);
+
+    if (entries.length === 0) {
+        panel.innerHTML = '<div class="empty-state">堆内存为空</div>';
+        return;
+    }
+
+    panel.innerHTML = entries.slice(0, 30).map(([addr, entry]) => {
+        const isHL = String(addr) === String(highlightAddr);
+        const valHtml = formatMemValue(entry);
+        return `<div class="mem-entry${isHL ? ' highlight' : ''}">
+            <span class="mem-addr">@${addr}</span>
+            <span class="mem-type"> ${entry.type}</span>
+            <span class="mem-val">${valHtml}</span>
+        </div>`;
+    }).join('') + (entries.length > 30 ? `<div style="color:var(--text-dim);font-size:10px;padding:4px 6px;">... 还有 ${entries.length - 30} 条</div>` : '');
+}
+
+function formatMemValue(entry) {
+    const v = entry.value;
+    if (!v || typeof v !== 'object') return stringifyVal(v);
+
+    if (entry.type === 'object' && v.properties) {
+        // 对象：展开属性列表
+        const propEntries = Object.entries(v.properties);
+        if (propEntries.length === 0) return '<span style="color:var(--text-dim)">{ }</span>';
+        const props = propEntries.slice(0, 8).map(([k, pv]) => {
+            const pvStr = pv && typeof pv === 'object' && pv.address != null
+                ? `<span style="color:var(--orange)">@${pv.address}</span>`
+                : stringifyVal(pv);
+            return `<span style="color:var(--accent)">${escapeHtml(k)}</span>: ${pvStr}`;
+        }).join(', ');
+        const more = propEntries.length > 8 ? `<span style="color:var(--text-dim)"> +${propEntries.length - 8}</span>` : '';
+        return `<span style="color:var(--text-dim)">{</span> ${props}${more} <span style="color:var(--text-dim)">}</span>`;
+    }
+
+    if (entry.type === 'function') {
+        // 函数：显示类型和名称
+        if (v.type === 'builtin') return `<span style="color:var(--cyan)">builtin:${escapeHtml(v.name || '?')}</span>`;
+        if (v.type === 'regular') return `<span style="color:var(--cyan)">fn ${escapeHtml(v.name || '(anon)')}</span>`;
+        return `<span style="color:var(--cyan)">${escapeHtml(v.type || 'function')}</span>`;
+    }
+
+    if (entry.type === 'array' && v.elements) {
+        const items = v.elements.slice(0, 6).map(e => stringifyVal(e)).join(', ');
+        const more = v.elements.length > 6 ? ` +${v.elements.length - 6}` : '';
+        return `<span style="color:var(--text-dim)">[</span> ${items}${more} <span style="color:var(--text-dim)">]</span>`;
+    }
+
+    return stringifyVal(v);
+}
+
+// ─── 自动播放 ───
+function toggleAutoPlay() {
+    if (isPlaying) {
+        stopAutoPlay();
+    } else {
+        startAutoPlay();
+    }
+}
+
+function startAutoPlay() {
+    isPlaying = true;
+    document.getElementById('autoBtn').classList.add('playing');
+    document.getElementById('autoBtn').textContent = '⏸';
+    autoStep();
+}
+
+function stopAutoPlay() {
+    isPlaying = false;
+    document.getElementById('autoBtn').classList.remove('playing');
+    document.getElementById('autoBtn').textContent = '⏯';
+    if (autoPlayTimer) { clearTimeout(autoPlayTimer); autoPlayTimer = null; }
+}
+
+function autoStep() {
+    if (!isPlaying) return;
+    if (currentStep < steps.length - 1) {
+        goToStep(currentStep + 1);
+        const speed = parseInt(document.getElementById('speedSlider').value);
+        autoPlayTimer = setTimeout(autoStep, 2100 - speed); // 100ms~2000ms
+    } else {
+        stopAutoPlay();
+    }
+}
+
+// ─── 清空 ───
+function clearAll() {
+    stopAutoPlay();
+    steps = [];
+    currentStep = -1;
+    document.getElementById('stepControls').style.display = 'none';
+    document.getElementById('eventDesc').style.display = 'none';
+    document.getElementById('errorBanner').style.display = 'none';
+    document.getElementById('timelineLegend').style.display = 'none';
+    document.getElementById('timeline').innerHTML = '<div class="empty-state">执行代码后将在此显示步骤</div>';
+    document.getElementById('timelineCount').textContent = '0';
+    document.getElementById('stackPanel').innerHTML = '<div class="empty-state">执行代码以查看调用栈</div>';
+    document.getElementById('scopePanel').innerHTML = '<div class="empty-state">执行代码以查看作用域链</div>';
+    document.getElementById('closureThisPanel').innerHTML = '<div class="empty-state">执行代码以查看闭包和 this</div>';
+    document.getElementById('memoryPanel').innerHTML = '<div class="empty-state">执行代码以查看堆内存</div>';
+    highlightSourceLine(null); // 清除源码行高亮
+}
+
+// ─── 键盘快捷键 ───
+document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'TEXTAREA') return; // 不在编辑器中触发
+    if (steps.length === 0) return;
+    switch (e.key) {
+        case 'ArrowLeft':  goToStep(currentStep - 1); e.preventDefault(); break;
+        case 'ArrowRight': goToStep(currentStep + 1); e.preventDefault(); break;
+        case 'Home':       goToStep(0); e.preventDefault(); break;
+        case 'End':        goToStep(steps.length - 1); e.preventDefault(); break;
+        case ' ':          toggleAutoPlay(); e.preventDefault(); break;
+        case 'Enter':
+            if (e.ctrlKey || e.metaKey) { executeCode(); e.preventDefault(); }
+            break;
+    }
+});
+
+// ─── 工具函数 ───
+function escapeHtml(s) {
+    if (typeof s !== 'string') return String(s);
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function stringifyVal(v) {
+    if (v === null) return '<span style="color:var(--text-dim)">null</span>';
+    if (v === undefined || v === '<undefined>') return '<span style="color:var(--text-dim)">undefined</span>';
+    if (v === '<uninitialized>') return '<span style="color:var(--red)">uninitialized</span>';
+    if (typeof v === 'string') return '<span style="color:var(--green)">"' + escapeHtml(v) + '"</span>';
+    if (typeof v === 'number') return '<span style="color:var(--orange)">' + v + '</span>';
+    if (typeof v === 'boolean') return '<span style="color:var(--accent2)">' + v + '</span>';
+    if (typeof v === 'object') {
+        try {
+            const s = JSON.stringify(v);
+            return '<span style="color:var(--text-dim)">' + escapeHtml(s.length > 60 ? s.slice(0, 60) + '...' : s) + '</span>';
+        } catch { return '<span style="color:var(--text-dim)">[object]</span>'; }
+    }
+    return escapeHtml(String(v));
+}
+
+// ─── 页面加载时自动执行默认代码 ───
+window.addEventListener('DOMContentLoaded', () => {
+    const textarea = document.getElementById('codeEditor');
+    const lineNums = document.getElementById('lineNumbers');
+
+    // 同步滚动
+    textarea.addEventListener('scroll', () => {
+        lineNums.scrollTop = textarea.scrollTop;
+    });
+
+    // 内容变化时更新行号
+    textarea.addEventListener('input', updateLineNumbers);
+
+    // 初始行号
+    updateLineNumbers();
+});
+</script>
+</body>
+</html>
