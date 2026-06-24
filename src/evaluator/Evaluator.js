@@ -71,6 +71,8 @@ export class Evaluator {
         this.memory = realm.memory;
         this.ecStack = realm.ecStack;
         this.hooks = hooks;
+        // 追踪当前作用域查找的目的：'read'（普通变量读取）或 'call'（为函数调用准备，触发 this 绑定）
+        this._lookupPurpose = 'read';
     }
 
     /**
@@ -681,15 +683,21 @@ export class Evaluator {
 
         if (node.callee.type === NODE_TYPE.MEMBER_EXPRESSION) {
             // 方法调用（如 console.log(x)）：求值 base object 一次，复用于成员访问和 this 绑定
+            const prevPurpose = this._lookupPurpose;
+            this._lookupPurpose = 'call';
             const baseObj = this.evaluate(node.callee.object);
             calleeResult = this._evalMemberExpression(node.callee, baseObj);
             const args = node.args.map(a => this.evaluate(a));
+            this._lookupPurpose = prevPurpose;
             thisValue = this._resolveThisForCall(node.callee, calleeResult, baseObj);
             return this._applyFunction(calleeResult, args, thisValue);
         }
 
+        const prevPurpose2 = this._lookupPurpose;
+        this._lookupPurpose = 'call';
         calleeResult = this.evaluate(node.callee);
         const args = node.args.map(a => this.evaluate(a));
+        this._lookupPurpose = prevPurpose2;
         thisValue = this._resolveThisForCall(node.callee, calleeResult);
         return this._applyFunction(calleeResult, args, thisValue);
     }
@@ -757,8 +765,11 @@ export class Evaluator {
      * @returns {Object} Ref<Object>
      */
     _evalNewExpression(node) {
+        const prevPurpose = this._lookupPurpose;
+        this._lookupPurpose = 'call';
         const callee = this.evaluate(node.callee);
         const args = node.args.map(a => this.evaluate(a));
+        this._lookupPurpose = prevPurpose;
 
         if (!isReference(callee)) {
             throw new TypeError(`${String(callee)} is not a constructor`);
@@ -950,7 +961,7 @@ export class Evaluator {
      * @throws {ReferenceError} 变量未定义
      */
     _resolveIdentifier(name) {
-        this.hooks.emit(HookEvents.SCOPE_LOOKUP, { name });
+        this.hooks.emit(HookEvents.SCOPE_LOOKUP, { name, purpose: this._lookupPurpose });
 
         // 从最内层 LE 开始，沿 outer 链向外查找
         let env = this.ecStack.current().lexicalEnvironment;
@@ -961,9 +972,9 @@ export class Evaluator {
             envChain.push(env.snapshot().bindings);
             // 检查是否有该名称的绑定（包括 TDZ 状态）
             if (env.environmentRecord.hasBinding(name) || env.environmentRecord.hasUninitializedBinding(name)) {
-                this.hooks.emit(HookEvents.SCOPE_CHAIN_RESOLVE, { name, found: true, depth, envChain });
+                this.hooks.emit(HookEvents.SCOPE_CHAIN_RESOLVE, { name, found: true, depth, envChain, purpose: this._lookupPurpose });
                 const value = env.environmentRecord.getBindingValue(name);
-                this.hooks.emit(HookEvents.VARIABLE_READ, { name, value: this._safeHookValue(value) });
+                this.hooks.emit(HookEvents.VARIABLE_READ, { name, value: this._safeHookValue(value), purpose: this._lookupPurpose });
                 return value;
             }
             // 向上一层（外层作用域）
@@ -971,7 +982,7 @@ export class Evaluator {
             depth++;
         }
 
-        this.hooks.emit(HookEvents.SCOPE_CHAIN_RESOLVE, { name, found: false, depth, envChain });
+        this.hooks.emit(HookEvents.SCOPE_CHAIN_RESOLVE, { name, found: false, depth, envChain, purpose: this._lookupPurpose });
         throw new ReferenceError(`${name} is not defined`);
     }
 
@@ -987,14 +998,14 @@ export class Evaluator {
      * @throws {ReferenceError} 变量未定义
      */
     _resolveIdentifierWithEnv(name) {
-        this.hooks.emit(HookEvents.SCOPE_LOOKUP, { name });
+        this.hooks.emit(HookEvents.SCOPE_LOOKUP, { name, purpose: this._lookupPurpose });
 
         let env = this.ecStack.current().lexicalEnvironment;
         let depth = 0;
 
         while (env) {
             if (env.environmentRecord.hasBinding(name) || env.environmentRecord.hasUninitializedBinding(name)) {
-                this.hooks.emit(HookEvents.SCOPE_CHAIN_RESOLVE, { name, found: true, depth });
+                this.hooks.emit(HookEvents.SCOPE_CHAIN_RESOLVE, { name, found: true, depth, purpose: this._lookupPurpose });
                 return { value: env.environmentRecord.getBindingValue(name), environment: env };
             }
             env = env.outer;
@@ -1295,8 +1306,11 @@ export class Evaluator {
      * @returns {*} 调用结果（call/apply）或 BoundFunction ref（bind）
      */
     _handleCallApplyBind(node, method) {
+        const prevPurpose = this._lookupPurpose;
+        this._lookupPurpose = 'call';
         const targetFunc = this.evaluate(node.callee.object);
         const args = node.args.map(a => this.evaluate(a));
+        this._lookupPurpose = prevPurpose;
 
         if (method === 'call') {
             // fn.call(thisArg, arg1, arg2, ...)

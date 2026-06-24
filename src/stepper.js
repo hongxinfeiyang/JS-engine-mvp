@@ -64,9 +64,13 @@ const SIGNIFICANT_EXIT_NODES = new Set([
 function describeEvent(event, data) {
     switch (event) {
         case HookEvents.CONTEXT_CREATION_START:
-            return `创建阶段开始 — ${data.type === 'function' ? '函数 ' + data.name : '全局环境'}`;
+            return data.type === 'function'
+                ? `环境变量声明阶段开始 — 函数 ${data.name}`
+                : `创建阶段开始 — 全局环境`;
         case HookEvents.CONTEXT_CREATION_END:
-            return `创建阶段完成 — ${data.type === 'function' ? '函数 ' + data.name : '全局环境'}（环境就绪，即将执行代码）`;
+            return data.type === 'function'
+                ? `执行上下文创建完成 — 函数 ${data.name}`
+                : `创建阶段完成 — 全局环境（环境就绪，即将执行代码）`;
         case HookEvents.CONTEXT_PUSH:
             return `执行上下文入栈 — ${data.type} ${data.name || ''}`;
         case HookEvents.CONTEXT_POP:
@@ -85,7 +89,9 @@ function describeEvent(event, data) {
         case HookEvents.VARIABLE_READ:
             return `读取变量 — ${data.name} → ${JSON.stringify(data.value)}`;
         case HookEvents.SCOPE_LOOKUP:
-            return `作用域查找 — 开始查找 "${data.name}"`;
+            return data.purpose === 'call'
+                ? `"${data.name}" 执行上下文创建阶段开始 — this绑定阶段 — 作用域查找 — 开始查找`
+                : `"${data.name}" 作用域查找 — 开始查找`;
         case HookEvents.SCOPE_CHAIN_RESOLVE:
             return `作用域查找结果 — "${data.name}" ${data.found ? '找到（深度=' + data.depth + '）' : '未找到'}`;
         case HookEvents.CLOSURE_CREATE:
@@ -97,7 +103,7 @@ function describeEvent(event, data) {
             }
             return `函数创建 — ${data.funcName}（顶层函数）`;
         case HookEvents.THIS_RESOLVE:
-            return `this 绑定 — 模式: ${data.pattern}, 值: ${JSON.stringify(data.value)}`;
+            return `this指向 — 模式: ${data.pattern}, 值: ${JSON.stringify(data.value)}`;
         case HookEvents.FUNCTION_CALL:
             return `函数调用 — ${data.name}(${(data.args || []).map(a => JSON.stringify(a)).join(', ')})`;
         case HookEvents.FUNCTION_RETURN:

@@ -584,15 +584,34 @@ const CREATION_EVENTS = new Set([
     'parse:node',
 ]);
 
-function isCreationPhase(event) {
-    return CREATION_EVENTS.has(event);
+// scope:lookup / scope:chain:resolve / variable:read 仅在为函数调用而查找时属于创建阶段
+const CALL_PURPOSE_EVENTS = new Set([
+    'scope:lookup',
+    'scope:chain:resolve',
+    'variable:read',
+]);
+
+// this:resolve 仅在调用准备阶段（确定 this 绑定）属于创建阶段，运行时 this 访问属于执行阶段
+const CREATION_THIS_PATTERNS = new Set([
+    'method-call',
+    'explicit',
+    'arrow',
+    'new',
+    'default',
+]);
+
+function isCreationPhase(event, data) {
+    if (CREATION_EVENTS.has(event)) return true;
+    if (CALL_PURPOSE_EVENTS.has(event) && data && data.purpose === 'call') return true;
+    if (event === 'this:resolve' && data && CREATION_THIS_PATTERNS.has(data.pattern)) return true;
+    return false;
 }
 
 // ─── 构建时间线 ───
 function buildTimeline() {
     const tl = document.getElementById('timeline');
     tl.innerHTML = steps.map((s, i) => {
-        const phase = isCreationPhase(s.event) ? 'create' : 'exec';
+        const phase = isCreationPhase(s.event, s.data) ? 'create' : 'exec';
         const phaseLabel = phase === 'create' ? '创建' : '执行';
         const hintText = getHintPlainText(s);
         return `<div class="timeline-item ${phase}-phase" id="tl-${i}" onclick="goToStep(${i})" title="${escapeHtml(hintText)}">
