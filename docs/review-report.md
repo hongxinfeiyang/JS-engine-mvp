@@ -106,7 +106,7 @@ Hook 数据新增 `isRealClosure` / `isNested` 字段。
 
 ### 4.2 🟢 轻微：文档细节
 
-- 部分文档中 GitHub URL 仍为占位符 `yourname/js-engine-mvp`
+- GitHub URL 已替换为正式地址 `hongxinfeiyang/JS-engine-mvp`
 - `res.md` 为临时追踪记录，可考虑加入 `.gitignore`
 
 ## 5. 评审结论

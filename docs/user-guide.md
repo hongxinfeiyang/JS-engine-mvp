@@ -183,9 +183,10 @@ engine.on('scope:chain:resolve', (d) => console.log('查找:', d.name, '深度:'
 engine.execute(`
     function outer() {
         var x = 10;
-        return function inner() {
+        function inner() {
             return x + 1;
-        };
+        }
+        return inner;
     }
     var fn = outer();
     fn();

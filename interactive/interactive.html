@@ -343,9 +343,10 @@ body {
             <div class="line-numbers" id="lineNumbers"></div>
             <textarea id="codeEditor" class="code-editor" placeholder="在此输入 JavaScript 代码...">function outer() {
     var x = 10;
-    return function inner() {
+    function inner() {
         return x + 1;
-    };
+    }
+    return inner;
 }
 var fn = outer();
 fn();</textarea>
@@ -445,32 +446,40 @@ let execLockFunc = null; // 当前执行锁定的函数名
 let execLockRelease = false;
 
 // ─── 示例代码 ───
-const demos = {
-    closure: `function outer() {
-    var x = 10;
-    return function inner() {
-        return x + 1;
-    };
-}
-var fn = outer();
-fn();`,
-    this: `function getX() {
-    return this.x;
-}
-var obj = { x: 42 };
-getX.call(obj);`,
-    scope: `var a = 1;
-{
-    let b = 2;
-    var c = 3;
-}
-a + c;`,
-    hoisting: `console.log(x);
-var x = 10;
-let y = 20;`,
-};
+// demos 从 /demos/*.js 文件加载，见 loadDemos()
+let demos = {};
 
-function loadDemo(name) {
+/**
+ * 从 /demos/ 目录加载所有示例代码文件
+ */
+async function loadDemos() {
+    const names = ['closure', 'this', 'scope', 'hoisting'];
+    for (const name of names) {
+        try {
+            const resp = await fetch(`/demos/${name}.js`);
+            if (resp.ok) {
+                demos[name] = await resp.text();
+            }
+        } catch {
+            // 文件不存在时不加载该 demo
+        }
+    }
+}
+
+/**
+ * 加载指定名称的 demo 到编辑器并执行
+ * @param {string} name - demo 名称
+ */
+async function loadDemo(name) {
+    // 确保 demos 已加载
+    if (!demos[name]) {
+        try {
+            const resp = await fetch(`/demos/${name}.js`);
+            if (resp.ok) demos[name] = await resp.text();
+        } catch {
+            // ignore
+        }
+    }
     document.getElementById('codeEditor').value = demos[name] || '';
     updateLineNumbers();
     if (demos[name]) executeCode();
@@ -615,8 +624,15 @@ function getHintPlainText(step) {
             return '创建阶段：扫描声明并提升，var → undefined，let/const → TDZ';
         case 'context:creation:end':
             return '创建阶段完成，进入执行阶段逐条执行代码';
-        case 'closure:create':
-            return '函数创建时捕获当前词法环境作为 [[Environment]]，形成闭包';
+        case 'closure:create': {
+            if (data.isRealClosure) {
+                return `闭包：${data.funcName} 捕获了外层变量 [${(data.capturedVars || []).join(', ')}]，形成闭包`;
+            }
+            if (data.isNested) {
+                return `${data.funcName} 是嵌套函数，但未捕获任何外层变量（自身声明遮蔽），非闭包`;
+            }
+            return `${data.funcName} 是顶层函数，无外层变量可捕获`;
+        }
         case 'this:resolve': {
             const patterns = {
                 'global': '全局 this 指向全局对象',
@@ -661,8 +677,15 @@ function getEventHint(step) {
             return '进入<strong>创建阶段</strong>：引擎扫描所有声明并执行提升（hoisting）—— <code class="hl-var">var</code> 初始化为 <code class="hl-var">undefined</code>，<code class="hl-let">let</code>/<code class="hl-const">const</code> 进入 TDZ，函数声明完整就绪';
         case 'context:creation:end':
             return '创建阶段完成，环境已就绪。接下来进入 <strong>执行阶段</strong>，逐条执行代码';
-        case 'closure:create':
-            return '函数对象创建时捕获当前词法环境作为 <strong>[[Environment]]</strong>，后续调用时新作用域的 outer 指向此环境 —— 这就是<strong>闭包</strong>的基石';
+        case 'closure:create': {
+            if (data.isRealClosure) {
+                return `函数对象创建时捕获当前词法环境作为 <strong>[[Environment]]</strong>，后续调用时新作用域的 outer 指向此环境。变量 <code>"${escapeHtml((data.capturedVars || []).join('", "'))}"</code> 被捕获 —— 这就是<strong>闭包</strong>的基石`;
+            }
+            if (data.isNested) {
+                return `<strong>${escapeHtml(data.funcName || '(anonymous)')}</strong> 是嵌套函数，但未捕获外层变量（同名变量被自身声明遮蔽），不构成闭包`;
+            }
+            return `<strong>${escapeHtml(data.funcName || '(anonymous)')}</strong> 是顶层函数，定义在全局作用域，无外层作用域可捕获。所有函数创建时都会设置 [[Environment]]，但只有嵌套函数捕获外层变量时才称为闭包`;
+        }
         case 'this:resolve': {
             const patterns = {
                 'global': '全局作用域中 <code>this</code> 指向全局对象',
@@ -872,8 +895,26 @@ function findSourceRange(step) {
             return null;
         }
 
-        case 'function:return':
+        case 'function:return': {
+            // 限定在返回函数的 body 范围内搜索 return，避免误匹配内层函数的 return
+            const funcName = data.name;
+            if (funcName) {
+                const bodyRange = findFuncBody(funcName);
+                if (bodyRange) {
+                    // 从函数体底部向上搜索，return 通常出现在函数末尾
+                    for (let i = bodyRange.end; i >= bodyRange.start; i--) {
+                        const idx = lines[i].indexOf('return ');
+                        if (idx !== -1) {
+                            // 选中整条 return 语句（到 ; 为止）
+                            const semiIdx = lines[i].indexOf(';', idx);
+                            const end = semiIdx !== -1 ? semiIdx + 1 : lines[i].length;
+                            return { line: i, colStart: idx, colEnd: end };
+                        }
+                    }
+                }
+            }
             return searchPattern('return ');
+        }
 
         case 'closure:create':
             if (data.funcName) return searchPattern('function ' + data.funcName);
@@ -974,7 +1015,36 @@ function findSourceRange(step) {
                     return { line: i, colStart: firstChar >= 0 ? firstChar : 0, colEnd: end };
                 }
             }
-            if (data.type === 'ReturnStatement') return searchPattern('return ');
+            if (data.type === 'ReturnStatement') {
+                // 限定在返回函数的 body 范围内搜索 return，避免误匹配内层函数的 return
+                const ecStack = step.ecStack || [];
+                let retFuncName = null;
+                for (let j = ecStack.length - 1; j >= 0; j--) {
+                    if (ecStack[j].type === 'function' && ecStack[j].name) { retFuncName = ecStack[j].name; break; }
+                }
+                if (!retFuncName) {
+                    for (let j = step.index - 1; j >= Math.max(0, step.index - 10); j--) {
+                        if (steps[j].event === 'function:call' && steps[j].data && steps[j].data.name) {
+                            retFuncName = steps[j].data.name; break;
+                        }
+                        if (steps[j].event === 'context:push') break;
+                    }
+                }
+                if (retFuncName) {
+                    const bodyRange = findFuncBody(retFuncName);
+                    if (bodyRange) {
+                        for (let i = bodyRange.end; i >= bodyRange.start; i--) {
+                            const idx = lines[i].indexOf('return ');
+                            if (idx !== -1) {
+                                const semiIdx = lines[i].indexOf(';', idx);
+                                const end = semiIdx !== -1 ? semiIdx + 1 : lines[i].length;
+                                return { line: i, colStart: idx, colEnd: end };
+                            }
+                        }
+                    }
+                }
+                return searchPattern('return ');
+            }
             return null;
 
         case 'context:push':
@@ -1233,8 +1303,16 @@ function renderScopeChain(step, highlight) {
         const bindings = env.bindings || {};
         const entries = Object.entries(bindings);
         const isCurrent = i === 0;
-        return `<div class="scope-env" style="${isCurrent ? 'opacity:1' : 'opacity:0.6'}">
-            <span class="se-level">${isCurrent ? '▶ 当前' : '  Level ' + i}</span>
+        // 闭包环境：不在 EC 栈上但被闭包引用保持存活
+        const isClosure = env.type === 'closure';
+        const levelLabel = isClosure
+            ? '<span style="color:var(--orange);">🔗 闭包环境</span>'
+            : (isCurrent ? '▶ 当前' : '  Level ' + i);
+        const borderColor = isClosure ? 'var(--orange)' : 'var(--accent2)';
+        const bgColor = isClosure ? 'rgba(255,158,100,0.06)' : 'rgba(187,154,247,0.08)';
+        const opacity = isClosure ? 1 : (isCurrent ? 1 : 0.6);
+        return `<div class="scope-env" style="opacity:${opacity};border-left-color:${borderColor};background:${bgColor};">
+            <span class="se-level">${levelLabel}</span>
             ${entries.length === 0
                 ? '<div style="color:var(--text-dim);font-size:10px;margin-left:8px;">(空环境)</div>'
                 : entries.map(([k, v]) => {
@@ -1452,8 +1530,8 @@ function stringifyVal(v) {
     return escapeHtml(String(v));
 }
 
-// ─── 页面加载时自动执行默认代码 ───
-window.addEventListener('DOMContentLoaded', () => {
+// ─── 页面加载时自动加载 demos 并执行默认代码 ───
+window.addEventListener('DOMContentLoaded', async () => {
     const textarea = document.getElementById('codeEditor');
     const lineNums = document.getElementById('lineNumbers');
 
@@ -1465,8 +1543,14 @@ window.addEventListener('DOMContentLoaded', () => {
     // 内容变化时更新行号
     textarea.addEventListener('input', updateLineNumbers);
 
+    // 加载示例代码
+    await loadDemos();
+
     // 初始行号
     updateLineNumbers();
+
+    // 自动执行默认代码
+    if (textarea.value.trim()) executeCode();
 });
 </script>
 </body>

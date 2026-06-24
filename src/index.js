@@ -240,10 +240,15 @@ export class JSEngine {
     }
 
     /**
-     * 获取当前作用域链
+     * 获取当前作用域链（包含闭包保持存活的词法环境）
      *
      * 从当前 EC 的词法环境开始，沿 outer 链向上回溯，
      * 直到到达全局环境（outer === null）。
+     *
+     * 额外扫描：遍历主链所有绑定，寻找闭包函数对象。
+     * 若函数的 [[Environment]]（closure）不在主作用域链上，
+     * 说明该环境虽已不在调用栈但被闭包引用而保持存活，
+     * 将其追加到作用域链尾部（标记 type: 'closure'）。
      *
      * 作用域链是理解标识符解析的关键：当 JS 引擎遇到一个变量名，
      * 会沿此链逐级查找，直到找到绑定或抵达链尾（抛出 ReferenceError）。
@@ -254,11 +259,62 @@ export class JSEngine {
         const ec = this.realm.ecStack.current();
         if (!ec) return [];
         const chain = [];
+        const seenEnvs = new Set(); // 已加入链的环境引用，防止重复
+
+        // 主作用域链：从当前 EC 的词法环境开始沿 outer 遍历
         let env = ec.lexicalEnvironment;
         while (env) {
+            seenEnvs.add(env);
             chain.push(env.snapshot());
             env = env.outer;
         }
+
+        // 闭包环境：扫描主链所有环境的所有绑定，找到被闭包保持存活的环境
+        const closureChains = [];
+        env = ec.lexicalEnvironment;
+        while (env) {
+            const er = env.environmentRecord;
+            // DeclarativeEnvironmentRecord：Map<name, Binding<{ value, initialized }>>
+            let candidateVals = [];
+            if (er.bindings instanceof Map) {
+                for (const [, binding] of er.bindings) {
+                    if (binding.initialized && binding.value != null) {
+                        candidateVals.push(binding.value);
+                    }
+                }
+            }
+            // ObjectEnvironmentRecord（如全局环境）：bindingObject.properties (Map)
+            if (er.bindingObject && er.bindingObject.properties instanceof Map) {
+                for (const [, rawVal] of er.bindingObject.properties) {
+                    if (rawVal != null) candidateVals.push(rawVal);
+                }
+            }
+
+            for (const val of candidateVals) {
+                // 检查是否为堆引用（Ref<FunctionObject>）
+                if (typeof val !== 'object' || typeof val.address !== 'number') continue;
+                const memEntry = this.realm.memory.getEntry(val.address);
+                if (!memEntry || !memEntry.value || typeof memEntry.value !== 'object') continue;
+                const closureEnv = memEntry.value.closure;
+                if (!closureEnv || seenEnvs.has(closureEnv)) continue;
+                // 找到闭包保持存活的词法环境，沿其 outer 链加入
+                let cEnv = closureEnv;
+                while (cEnv && !seenEnvs.has(cEnv)) {
+                    seenEnvs.add(cEnv);
+                    closureChains.push({
+                        ...cEnv.snapshot(),
+                        type: 'closure', // 闭包环境标记，前端用于区分展示
+                    });
+                    cEnv = cEnv.outer;
+                }
+            }
+            env = env.outer;
+        }
+
+        if (closureChains.length > 0) {
+            chain.push(...closureChains);
+        }
+
         return chain;
     }
 

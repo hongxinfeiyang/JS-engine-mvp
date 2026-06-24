@@ -1,0 +1,9 @@
+function outer() {
+    var x = 10;
+    function inner() {
+        return x + 1;
+    }
+    return inner;
+}
+var fn = outer();
+fn();

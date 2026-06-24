@@ -93,9 +93,10 @@ let y = 5;
 ```js
 function outer() {
     var x = 10;
-    return function inner() {
+    function inner() {
         return x + 1;
-    };
+    }
+    return inner;
 }
 var fn = outer();
 fn();
