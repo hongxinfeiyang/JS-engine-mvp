@@ -1465,7 +1465,7 @@ export class Evaluator {
             });
         }
 
-        // 5. 创建执行上下文并入栈
+        // 5. 创建执行上下文（仅创建，不入栈）
         const funcEC = new ExecutionContext(
             EC_TYPE.FUNCTION,
             localEnv,   // LE
@@ -1473,7 +1473,6 @@ export class Evaluator {
             effectiveThis,
             { name: funcName },
         );
-        this.ecStack.push(funcEC);
 
         this.hooks.emit(HookEvents.CONTEXT_CREATION_END, {
             type: 'function',
@@ -1491,12 +1490,15 @@ export class Evaluator {
         // RETURN_SENTINEL 在此被解包：函数遇到 return 时产生哨兵，
         // 本循环检测哨兵后立即停止执行并取出真实返回值。
         // ═══════════════════════════════════════════════════════════
+        // 进入执行阶段：EC 入栈 → 函数调用 → 执行函数体
+        // ═══════════════════════════════════════════════════════════
+        this.ecStack.push(funcEC);
+        this.hooks.emit(HookEvents.CONTEXT_PUSH, funcEC.snapshot());
         this.hooks.emit(HookEvents.FUNCTION_CALL, {
             name: funcName,
             args: args.map(a => this._safeHookValue(a)),
             thisValue: this._safeHookValue(effectiveThis),
         });
-        this.hooks.emit(HookEvents.CONTEXT_PUSH, funcEC.snapshot());
 
         let result;
         const evalBody = funcObj.body.type === NODE_TYPE.BLOCK_STATEMENT
@@ -1512,13 +1514,13 @@ export class Evaluator {
             }
         }
 
-        // ─── 退出函数：弹栈 → 触发 hook → 返回结果 ───
-        this.ecStack.pop();
-        this.hooks.emit(HookEvents.CONTEXT_POP, { type: 'function', name: funcName });
+        // ─── 退出函数：返回值 → 弹栈 → 返回结果 ───
         this.hooks.emit(HookEvents.FUNCTION_RETURN, {
             name: funcName,
             value: this._safeHookValue(result),
         });
+        this.ecStack.pop();
+        this.hooks.emit(HookEvents.CONTEXT_POP, { type: 'function', name: funcName });
 
         return result;
     }
